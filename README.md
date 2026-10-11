@@ -1,17 +1,18 @@
 import argparse
 import json
 import os
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
+from youtube_transcript_api import NoTranscriptFound, VideoUnavailable, YouTubeTranscriptApi
 
 
 load_dotenv()
 
 
 class YouTubeSkill:
-    """A simple YouTube agent skill for searching videos and retrieving metadata."""
+    """A YouTube agent skill for video discovery, metadata, and transcript retrieval."""
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("YOUTUBE_API_KEY")
@@ -21,23 +22,20 @@ class YouTubeSkill:
             )
         self.service = build("youtube", "v3", developerKey=self.api_key)
 
+    @staticmethod
+    def _thumbnail_url(snippet: Dict[str, Any]) -> Optional[str]:
+        thumbnails = snippet.get("thumbnails", {})
+        return (
+            thumbnails.get("high", {}).get("url")
+            or thumbnails.get("medium", {}).get("url")
+            or thumbnails.get("default", {}).get("url")
+        )
+
     def _normalize_search_result(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         snippet = item.get("snippet", {})
         video_id = item.get("id", {}).get("videoId")
         if not video_id:
             return None
-
-        thumbnail = (
-            snippet.get("thumbnails", {})
-            .get("high", {})
-            .get("url")
-            or snippet.get("thumbnails", {})
-            .get("medium", {})
-            .get("url")
-            or snippet.get("thumbnails", {})
-            .get("default", {})
-            .get("url")
-        )
 
         return {
             "video_id": video_id,
@@ -46,7 +44,7 @@ class YouTubeSkill:
             "channel": snippet.get("channelTitle"),
             "channel_id": snippet.get("channelId"),
             "published_at": snippet.get("publishedAt"),
-            "thumbnail_url": thumbnail,
+            "thumbnail_url": self._thumbnail_url(snippet),
             "watch_url": f"https://www.youtube.com/watch?v={video_id}",
             "channel_url": (
                 f"https://www.youtube.com/channel/{snippet.get('channelId')}"
@@ -92,7 +90,7 @@ class YouTubeSkill:
 
     def get_video_details(
         self,
-        video_ids: Sequence[str] | str,
+        video_ids: Union[str, Sequence[str]],
         part: str = "snippet,statistics,contentDetails",
     ) -> List[Dict[str, Any]]:
         """Fetch detailed metadata for one or more YouTube video IDs."""
@@ -124,17 +122,7 @@ class YouTubeSkill:
                     "channel_id": snippet.get("channelId"),
                     "description": snippet.get("description"),
                     "published_at": snippet.get("publishedAt"),
-                    "thumbnail_url": (
-                        snippet.get("thumbnails", {})
-                        .get("high", {})
-                        .get("url")
-                        or snippet.get("thumbnails", {})
-                        .get("medium", {})
-                        .get("url")
-                        or snippet.get("thumbnails", {})
-                        .get("default", {})
-                        .get("url")
-                    ),
+                    "thumbnail_url": self._thumbnail_url(snippet),
                     "duration": details.get("duration"),
                     "view_count": stats.get("viewCount"),
                     "like_count": stats.get("likeCount"),
@@ -150,7 +138,7 @@ class YouTubeSkill:
         max_results: int = 5,
         region_code: str = "US",
     ) -> List[Dict[str, Any]]:
-        """Search for channels when the agent needs broader discovery."""
+        """Search for channels when the agent needs creator discovery."""
         if not query or not query.strip():
             raise ValueError("Query cannot be empty.")
 
@@ -178,18 +166,113 @@ class YouTubeSkill:
                     "channel_id": channel_id,
                     "channel_name": snippet.get("title"),
                     "description": snippet.get("description"),
-                    "thumbnail_url": (
-                        snippet.get("thumbnails", {})
-                        .get("high", {})
-                        .get("url")
-                        or snippet.get("thumbnails", {})
-                        .get("medium", {})
-                        .get("url")
-                    ),
+                    "thumbnail_url": self._thumbnail_url(snippet),
                     "channel_url": f"https://www.youtube.com/channel/{channel_id}",
                 }
             )
         return results
+
+    def search_playlists(
+        self,
+        query: str,
+        max_results: int = 5,
+        region_code: str = "US",
+    ) -> List[Dict[str, Any]]:
+        """Search for playlists that match a topic or channel."""
+        if not query or not query.strip():
+            raise ValueError("Query cannot be empty.")
+
+        response = (
+            self.service.search()
+            .list(
+                part="snippet",
+                q=query,
+                type="playlist",
+                maxResults=max_results,
+                regionCode=region_code,
+            )
+            .execute()
+        )
+
+        results: List[Dict[str, Any]] = []
+        for item in response.get("items", []):
+            snippet = item.get("snippet", {})
+            playlist_id = item.get("id", {}).get("playlistId")
+            if not playlist_id:
+                continue
+
+            results.append(
+                {
+                    "playlist_id": playlist_id,
+                    "title": snippet.get("title"),
+                    "description": snippet.get("description"),
+                    "channel": snippet.get("channelTitle"),
+                    "thumbnail_url": self._thumbnail_url(snippet),
+                    "playlist_url": f"https://www.youtube.com/playlist?list={playlist_id}",
+                }
+            )
+        return results
+
+    def get_playlist_items(
+        self,
+        playlist_id: str,
+        max_results: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Return the videos contained in a playlist."""
+        if not playlist_id or not playlist_id.strip():
+            raise ValueError("playlist_id cannot be empty.")
+
+        response = (
+            self.service.playlistItems()
+            .list(
+                part="snippet,contentDetails",
+                playlistId=playlist_id,
+                maxResults=max_results,
+            )
+            .execute()
+        )
+
+        results: List[Dict[str, Any]] = []
+        for item in response.get("items", []):
+            snippet = item.get("snippet", {})
+            content = item.get("contentDetails", {})
+            video_id = content.get("videoId")
+            if not video_id:
+                continue
+
+            results.append(
+                {
+                    "video_id": video_id,
+                    "title": snippet.get("title"),
+                    "description": snippet.get("description"),
+                    "channel": snippet.get("channelTitle"),
+                    "published_at": snippet.get("publishedAt"),
+                    "thumbnail_url": self._thumbnail_url(snippet),
+                    "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+                }
+            )
+        return results
+
+    def get_video_transcript(self, video_id: str, languages: Optional[List[str]] = None) -> List[Dict[str, str]]:
+        """Fetch transcript text for a video using youtube-transcript-api."""
+        if not video_id or not video_id.strip():
+            raise ValueError("video_id cannot be empty.")
+
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(
+                video_id,
+                languages=languages or ["en", "en-US"],
+            )
+            return [
+                {
+                    "text": entry.get("text", ""),
+                    "start": str(entry.get("start", 0)),
+                    "duration": str(entry.get("duration", 0)),
+                }
+                for entry in transcript
+            ]
+        except (NoTranscriptFound, VideoUnavailable):
+            return []
 
 
 def main() -> None:
@@ -201,6 +284,7 @@ def main() -> None:
     parser.add_argument("--safe-search", default="moderate", help="YouTube safe search level")
     parser.add_argument("--video-duration", default=None, help="Filter: any, short, medium, long")
     parser.add_argument("--include-details", action="store_true", help="Fetch full metadata for each returned video")
+    parser.add_argument("--include-transcript", action="store_true", help="Fetch transcript text for the first returned video if available")
     args = parser.parse_args()
 
     skill = YouTubeSkill()
@@ -215,12 +299,13 @@ def main() -> None:
 
     if args.include_details:
         video_ids = [result["video_id"] for result in results]
-        detail_map = {
-            item["video_id"]: item
-            for item in skill.get_video_details(video_ids)
-        }
+        detail_map = {item["video_id"]: item for item in skill.get_video_details(video_ids)}
         for result in results:
             result["details"] = detail_map.get(result["video_id"], {})
+
+    if args.include_transcript and results:
+        first_video_id = results[0]["video_id"]
+        results[0]["transcript"] = skill.get_video_transcript(first_video_id)
 
     print(json.dumps(results, indent=2, ensure_ascii=False))
 
