@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
