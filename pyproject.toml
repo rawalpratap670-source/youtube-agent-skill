@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-agent-skill"
+version = "0.1.0"
+description = "Live YouTube search, metadata, and transcript utility for agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "google-api-python-client>=2.150.0",
+  "python-dotenv>=1.0.1",
+  "youtube-transcript-api>=1.0.0",
+]
+
+[tool.setuptools]
+packages = ["youtube_skill"]
