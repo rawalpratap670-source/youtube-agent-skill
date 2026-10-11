@@ -1,73 +1,230 @@
-# YouTube Agent Skill
+import argparse
+import json
+import os
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-A lightweight Python skill for searching YouTube videos using the YouTube Data API v3.
+from dotenv import load_dotenv
+from googleapiclient.discovery import build
 
-## Features
-- Search for videos by keyword or phrase
-- Return top results with title, description, channel, published date, thumbnail, and direct watch URL
-- Built for simple agent integration or CLI usage
 
-## Setup
+load_dotenv()
 
-1. Create a Google Cloud project and enable the YouTube Data API v3.
-2. Create an API key.
-3. Copy the env file and add your key:
 
-```bash
-cp .env.example .env
-```
+class YouTubeSkill:
+    """A simple YouTube agent skill for searching videos and retrieving metadata."""
 
-Then update `.env`:
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("YOUTUBE_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "YOUTUBE_API_KEY is missing. Set it in your environment or .env file."
+            )
+        self.service = build("youtube", "v3", developerKey=self.api_key)
 
-```env
-YOUTUBE_API_KEY=your_api_key_here
-```
+    def _normalize_search_result(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        snippet = item.get("snippet", {})
+        video_id = item.get("id", {}).get("videoId")
+        if not video_id:
+            return None
 
-## Install
+        thumbnail = (
+            snippet.get("thumbnails", {})
+            .get("high", {})
+            .get("url")
+            or snippet.get("thumbnails", {})
+            .get("medium", {})
+            .get("url")
+            or snippet.get("thumbnails", {})
+            .get("default", {})
+            .get("url")
+        )
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+        return {
+            "video_id": video_id,
+            "title": snippet.get("title"),
+            "description": snippet.get("description"),
+            "channel": snippet.get("channelTitle"),
+            "channel_id": snippet.get("channelId"),
+            "published_at": snippet.get("publishedAt"),
+            "thumbnail_url": thumbnail,
+            "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+            "channel_url": (
+                f"https://www.youtube.com/channel/{snippet.get('channelId')}"
+                if snippet.get("channelId")
+                else None
+            ),
+        }
 
-## Usage
+    def search_videos(
+        self,
+        query: str,
+        max_results: int = 5,
+        region_code: str = "US",
+        order: str = "relevance",
+        safe_search: str = "moderate",
+        video_duration: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search for YouTube videos and return normalized metadata."""
+        if not query or not query.strip():
+            raise ValueError("Query cannot be empty.")
 
-### Python
+        params: Dict[str, Any] = {
+            "part": "snippet",
+            "q": query,
+            "type": "video",
+            "maxResults": max_results,
+            "regionCode": region_code,
+            "order": order,
+            "safeSearch": safe_search,
+        }
+        if video_duration is not None:
+            params["videoDuration"] = video_duration
 
-```python
-from youtube_skill import YouTubeSkill
+        response = self.service.search().list(**params).execute()
+        items = response.get("items", [])
 
-skill = YouTubeSkill()
-results = skill.search_videos("python tutorials", max_results=5)
-print(results)
-```
+        results: List[Dict[str, Any]] = []
+        for item in items:
+            normalized = self._normalize_search_result(item)
+            if normalized:
+                results.append(normalized)
+        return results
 
-### CLI
+    def get_video_details(
+        self,
+        video_ids: Sequence[str] | str,
+        part: str = "snippet,statistics,contentDetails",
+    ) -> List[Dict[str, Any]]:
+        """Fetch detailed metadata for one or more YouTube video IDs."""
+        if isinstance(video_ids, str):
+            ids = [video_ids]
+        else:
+            ids = [str(video_id) for video_id in video_ids if str(video_id).strip()]
 
-```bash
-python youtube_skill.py "python tutorials" --max-results 5
-```
+        if not ids:
+            return []
 
-## Example output
+        response = self.service.videos().list(part=part, id=",".join(ids)).execute()
+        items = response.get("items", [])
 
-```json
-[
-  {
-    "video_id": "abc123",
-    "title": "Python Tutorial for Beginners",
-    "channel": "freeCodeCamp.org",
-    "channel_id": "UC...",
-    "published_at": "2024-01-15T10:00:00Z",
-    "description": "Learn Python from scratch",
-    "thumbnail_url": "https://i.ytimg.com/vi/abc123/hqdefault.jpg",
-    "watch_url": "https://www.youtube.com/watch?v=abc123"
-  }
-]
-```
+        results: List[Dict[str, Any]] = []
+        for item in items:
+            snippet = item.get("snippet", {})
+            stats = item.get("statistics", {})
+            details = item.get("contentDetails", {})
+            video_id = item.get("id")
+            if not video_id:
+                continue
 
-## Notes
+            results.append(
+                {
+                    "video_id": video_id,
+                    "title": snippet.get("title"),
+                    "channel": snippet.get("channelTitle"),
+                    "channel_id": snippet.get("channelId"),
+                    "description": snippet.get("description"),
+                    "published_at": snippet.get("publishedAt"),
+                    "thumbnail_url": (
+                        snippet.get("thumbnails", {})
+                        .get("high", {})
+                        .get("url")
+                        or snippet.get("thumbnails", {})
+                        .get("medium", {})
+                        .get("url")
+                        or snippet.get("thumbnails", {})
+                        .get("default", {})
+                        .get("url")
+                    ),
+                    "duration": details.get("duration"),
+                    "view_count": stats.get("viewCount"),
+                    "like_count": stats.get("likeCount"),
+                    "comment_count": stats.get("commentCount"),
+                    "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+                }
+            )
+        return results
 
-- YouTube API usage is subject to quota limits.
-- Search results are best-effort and depend on the query and API quota available.
-- This skill focuses on video discovery and metadata retrieval.
+    def search_channels(
+        self,
+        query: str,
+        max_results: int = 5,
+        region_code: str = "US",
+    ) -> List[Dict[str, Any]]:
+        """Search for channels when the agent needs broader discovery."""
+        if not query or not query.strip():
+            raise ValueError("Query cannot be empty.")
+
+        response = (
+            self.service.search()
+            .list(
+                part="snippet",
+                q=query,
+                type="channel",
+                maxResults=max_results,
+                regionCode=region_code,
+            )
+            .execute()
+        )
+
+        results: List[Dict[str, Any]] = []
+        for item in response.get("items", []):
+            snippet = item.get("snippet", {})
+            channel_id = item.get("id", {}).get("channelId")
+            if not channel_id:
+                continue
+
+            results.append(
+                {
+                    "channel_id": channel_id,
+                    "channel_name": snippet.get("title"),
+                    "description": snippet.get("description"),
+                    "thumbnail_url": (
+                        snippet.get("thumbnails", {})
+                        .get("high", {})
+                        .get("url")
+                        or snippet.get("thumbnails", {})
+                        .get("medium", {})
+                        .get("url")
+                    ),
+                    "channel_url": f"https://www.youtube.com/channel/{channel_id}",
+                }
+            )
+        return results
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Search and inspect YouTube videos")
+    parser.add_argument("query", help="Search query to run against YouTube")
+    parser.add_argument("--max-results", type=int, default=5, help="Number of results to return")
+    parser.add_argument("--region-code", default="US", help="Region code for results")
+    parser.add_argument("--order", default="relevance", help="YouTube result ordering")
+    parser.add_argument("--safe-search", default="moderate", help="YouTube safe search level")
+    parser.add_argument("--video-duration", default=None, help="Filter: any, short, medium, long")
+    parser.add_argument("--include-details", action="store_true", help="Fetch full metadata for each returned video")
+    args = parser.parse_args()
+
+    skill = YouTubeSkill()
+    results = skill.search_videos(
+        query=args.query,
+        max_results=args.max_results,
+        region_code=args.region_code,
+        order=args.order,
+        safe_search=args.safe_search,
+        video_duration=args.video_duration,
+    )
+
+    if args.include_details:
+        video_ids = [result["video_id"] for result in results]
+        detail_map = {
+            item["video_id"]: item
+            for item in skill.get_video_details(video_ids)
+        }
+        for result in results:
+            result["details"] = detail_map.get(result["video_id"], {})
+
+    print(json.dumps(results, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
+
